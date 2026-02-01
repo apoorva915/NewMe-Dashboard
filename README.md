@@ -1,6 +1,6 @@
 # NeuMe – Parent Monitor
 
-A simple prototype that logs focus sessions and shows a live parent dashboard. No auth, no build tools—just Python, Flask, SQLite, and a single HTML file.
+A **Focus Session Logger + Parent Monitor** prototype: receive session, focus, and meltdown data; store it safely (crash-safe SQLite); show parents a live view and progress over time. No headset or game required—simulated inputs are enough for a full end-to-end demo.
 
 ## Tech stack
 
@@ -55,7 +55,7 @@ If you run `python -m http.server 8000` from a different folder (e.g. `NewMe`), 
 
 Make sure the backend is running so the dashboard can talk to it.
 
-## Demo the system in 4 steps
+## End-to-end demo (5 steps)
 
 1. **Start the backend**  
    In a terminal: `cd backend` then `python app.py`.
@@ -64,24 +64,31 @@ Make sure the backend is running so the dashboard can talk to it.
    Open `frontend/index.html` in your browser, or run `python -m http.server 8000` from `neume-parent-monitor` and go to **http://127.0.0.1:8000/frontend/index.html**.
 
 3. **Start a session**  
-   Click **Start Session**. The status should show “Running”.
+   Click **Start Session**. Status shows “Session Running”. DB row is created.
 
-4. **Try the controls**  
-   - Move the **Focus** slider to send focus scores; the battery bar updates.  
-   - Click **Trigger Meltdown** to show “Taking a comfort break 💛”.  
-   - Click **End Session** to mark the session as ended.
+4. **Simulate focus and events**  
+   - Move the **Focus** slider (0–100); battery bar updates live (green 70+, yellow 40–69, red 0–39).  
+   - Click **Trigger Meltdown** → “Taking a comfort break 💛” appears; click **Clear message** to dismiss.  
+   - Click **End Session** (normal end) or **End session early** (interrupted). Data is preserved.
 
-The dashboard polls the server every second, so you see updates without refreshing.
+5. **View progress over time**  
+   Scroll to **Progress over time**. See sessions this week, a table of past sessions (start time, duration, avg focus, status), and click **Refresh history** to reload.
+
+**Simulate session** runs a short automated demo: starts a session, sends random focus every 2 seconds, triggers one meltdown, then ends—good for judges and demos.
+
+The dashboard polls `/latest` every second; every insert is committed immediately (crash-safe).
 
 ## API summary
 
-| Method | Endpoint       | Purpose                                      |
-|--------|----------------|----------------------------------------------|
-| POST   | `/start_session` | Create a session; returns `session_id`    |
-| POST   | `/add_focus`     | Send `session_id` + `focus_score` (0–100) |
-| POST   | `/meltdown`      | Log a meltdown for the session            |
-| POST   | `/end_session`   | Mark session as ended                     |
-| GET    | `/latest`        | Latest session status, focus, meltdown    |
+| Method | Endpoint       | Purpose |
+|--------|----------------|--------|
+| POST   | `/start_session` | Create session; returns `session_id` |
+| POST   | `/add_focus`     | Send `session_id` + `focus_score` (0–100); optional `timestamp` |
+| POST   | `/meltdown`      | Log meltdown; optional `timestamp`, `notes` |
+| POST   | `/clear_meltdown` | Clear meltdown message for session |
+| POST   | `/end_session`   | Mark ended; send `interrupted: true` for “ended early” |
+| GET    | `/latest`        | Latest session status, focus score, meltdown flag |
+| GET    | `/history`       | List sessions with duration, avg focus; `sessions_this_week` |
 
 ## Project structure
 

@@ -48,8 +48,9 @@
     }
     .status-running { color: #2d7a4a; }
     .status-ended { color: #666; }
+    .status-interrupted { color: #b85a40; }
     .status-none { color: #999; }
-    /* Battery bar */
+    /* Battery bar: Green 70–100, Yellow 40–69, Red 0–39 */
     .battery-wrap {
       background: #e8e6e3;
       border-radius: 8px;
@@ -63,8 +64,8 @@
       transition: width 0.3s ease;
       background: linear-gradient(180deg, #6bb87a 0%, #4a9c5a 100%);
     }
-    .battery-fill.low { background: linear-gradient(180deg, #e8b84d 0%, #d4a02a 100%); }
-    .battery-fill.very-low { background: linear-gradient(180deg, #d4785c 0%, #b85a40 100%); }
+    .battery-fill.yellow { background: linear-gradient(180deg, #e8b84d 0%, #d4a02a 100%); }
+    .battery-fill.red { background: linear-gradient(180deg, #d4785c 0%, #b85a40 100%); }
     .battery-label {
       font-size: 0.85rem;
       color: #666;
@@ -135,6 +136,19 @@
       padding-top: 20px;
     }
     .demo-section h2 { margin-bottom: 12px; }
+    /* History / progress view */
+    .history-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+    }
+    .history-table th, .history-table td {
+      text-align: left;
+      padding: 8px 10px;
+      border-bottom: 1px solid #e8e6e3;
+    }
+    .history-table th { color: #555; font-weight: 600; }
+    .history-summary { margin-bottom: 12px; font-size: 0.9rem; color: #555; }
   </style>
 </head>
 <body>
@@ -166,11 +180,45 @@
     <div class="controls">
       <button id="btn-start" class="btn btn-primary">Start Session</button>
       <button id="btn-end" class="btn btn-secondary">End Session</button>
+      <button id="btn-end-early" class="btn btn-secondary">End session early</button>
       <button id="btn-meltdown" class="btn btn-comfort">Trigger Meltdown</button>
+      <button id="btn-simulate" class="btn btn-secondary">Simulate session</button>
     </div>
     <div class="slider-wrap">
       <label for="focus-slider">Focus (0–100): <span id="focus-value">—</span></label>
       <input type="range" id="focus-slider" min="0" max="100" value="80">
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Progress over time</h2>
+    <p id="history-summary" class="history-summary">Sessions this week: —</p>
+    <table class="history-table">
+      <thead>
+        <tr>
+          <th>Session</th>
+          <th>Start</th>
+          <th>Duration</th>
+          <th>Avg focus</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody id="history-tbody">
+        <tr><td colspan="5">No sessions yet.</td></tr>
+      </tbody>
+    </table>
+    <button id="btn-refresh-history" class="btn btn-secondary" style="margin-top: 12px;">Refresh history</button>
+    <p style="margin-top: 16px; font-size: 0.85rem; color: #666;">Clear old or stuck sessions:</p>
+    <div class="controls" style="margin-top: 8px;">
+      <label style="display: flex; align-items: center; gap: 6px;">
+        <span>From</span>
+        <input type="number" id="delete-from" min="1" value="1" style="width: 60px; padding: 6px;">
+      </label>
+      <label style="display: flex; align-items: center; gap: 6px;">
+        <span>To</span>
+        <input type="number" id="delete-to" min="1" value="14" style="width: 60px; padding: 6px;">
+      </label>
+      <button id="btn-delete-sessions" class="btn btn-secondary">Delete sessions</button>
     </div>
   </div>
 
@@ -188,10 +236,10 @@
     const focusSliderEl = document.getElementById("focus-slider");
 
     function setBatteryClass(el, pct) {
-      el.classList.remove("low", "very-low");
+      el.classList.remove("yellow", "red");
       if (pct !== null && pct !== undefined) {
-        if (pct < 30) el.classList.add("very-low");
-        else if (pct < 50) el.classList.add("low");
+        if (pct < 40) el.classList.add("red");
+        else if (pct < 70) el.classList.add("yellow");
       }
     }
 
@@ -208,8 +256,10 @@
       }
 
       currentSessionId = data.session_id;
-      sessionStatusEl.textContent = data.status === "running" ? "Running" : "Ended";
-      sessionStatusEl.className = "status-text " + (data.status === "running" ? "status-running" : "status-ended");
+      const statusLabels = { running: "Session Running", ended: "Ended", interrupted: "Ended Early" };
+      sessionStatusEl.textContent = statusLabels[data.status] || data.status || "—";
+      const statusClass = data.status === "running" ? "status-running" : (data.status === "interrupted" ? "status-interrupted" : "status-ended");
+      sessionStatusEl.className = "status-text " + statusClass;
 
       const score = data.focus_score;
       if (score !== null && score !== undefined) {
@@ -241,12 +291,53 @@
         });
     }
 
+    function formatDuration(sec) {
+      if (sec == null) return "—";
+      if (sec < 60) return sec + "s";
+      const m = Math.floor(sec / 60);
+      const s = sec % 60;
+      return s ? m + "m " + s + "s" : m + "m";
+    }
+
+    function formatTime(iso) {
+      if (!iso) return "—";
+      try {
+        const d = new Date(iso);
+        return d.toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
+      } catch (_) { return iso; }
+    }
+
+    function loadHistory() {
+      fetch(API + "/history")
+        .then((res) => res.json())
+        .then((data) => {
+          document.getElementById("history-summary").textContent = "Sessions this week: " + (data.sessions_this_week ?? 0);
+          const tbody = document.getElementById("history-tbody");
+          const sessions = data.sessions || [];
+          if (sessions.length === 0) {
+            tbody.innerHTML = "<tr><td colspan=\"5\">No sessions yet.</td></tr>";
+            return;
+          }
+          const statusLabels = { running: "Running", ended: "Ended", interrupted: "Ended early" };
+          tbody.innerHTML = sessions.map((s) => {
+            const status = statusLabels[s.status] || s.status || "—";
+            const avg = s.avg_focus != null ? Math.round(s.avg_focus) + "%" : "—";
+            return "<tr><td>S" + String(s.session_id).padStart(3, "0") + "</td><td>" + formatTime(s.start_time) + "</td><td>" + formatDuration(s.duration_seconds) + "</td><td>" + avg + "</td><td>" + status + "</td></tr>";
+          }).join("");
+        })
+        .catch(() => {
+          document.getElementById("history-summary").textContent = "Sessions this week: —";
+          document.getElementById("history-tbody").innerHTML = "<tr><td colspan=\"5\">Could not load history.</td></tr>";
+        });
+    }
+
     document.getElementById("btn-start").addEventListener("click", () => {
       fetch(API + "/start_session", { method: "POST" })
         .then((res) => res.json())
         .then((data) => {
           currentSessionId = data.session_id;
           pollLatest();
+          loadHistory();
         })
         .catch(console.error);
     });
@@ -258,8 +349,39 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ session_id: currentSessionId }),
       })
-        .then(() => pollLatest())
+        .then(() => { pollLatest(); loadHistory(); })
         .catch(console.error);
+    });
+
+    document.getElementById("btn-end-early").addEventListener("click", () => {
+      if (!currentSessionId) return;
+      fetch(API + "/end_session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: currentSessionId, interrupted: true }),
+      })
+        .then(() => { pollLatest(); loadHistory(); })
+        .catch(console.error);
+    });
+
+    document.getElementById("btn-refresh-history").addEventListener("click", loadHistory);
+
+    document.getElementById("btn-delete-sessions").addEventListener("click", () => {
+      const fromId = parseInt(document.getElementById("delete-from").value, 10);
+      const toId = parseInt(document.getElementById("delete-to").value, 10);
+      if (isNaN(fromId) || isNaN(toId)) return;
+      if (!confirm("Delete sessions " + fromId + " to " + toId + "? This cannot be undone.")) return;
+      fetch(API + "/delete_sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ from_id: fromId, to_id: toId }),
+      })
+        .then((res) => res.json())
+        .then((data) => {
+          if (data.error) alert(data.error);
+          else { alert("Deleted " + (data.deleted || 0) + " session(s)."); loadHistory(); pollLatest(); }
+        })
+        .catch((e) => alert("Failed: " + e.message));
     });
 
     document.getElementById("btn-meltdown").addEventListener("click", () => {
@@ -298,9 +420,55 @@
     // Show slider value on load
     focusValueEl.textContent = focusSliderEl.value;
 
-    // Initial poll and then every 1 second
+    // Initial poll and then every 1 second; load history on load
     pollLatest();
+    loadHistory();
     setInterval(pollLatest, 1000);
+
+    // Simulate session: start, send random focus every 2s for ~20s, optional meltdown, then end
+    document.getElementById("btn-simulate").addEventListener("click", () => {
+      const btn = document.getElementById("btn-simulate");
+      if (btn.disabled) return;
+      fetch(API + "/start_session", { method: "POST" })
+        .then((res) => res.json())
+        .then((data) => {
+          const sid = data.session_id;
+          currentSessionId = sid;
+          pollLatest();
+          btn.disabled = true;
+          btn.textContent = "Simulating…";
+          let count = 0;
+          const max = 10;
+          const iv = setInterval(() => {
+            const score = 40 + Math.floor(Math.random() * 55);
+            fetch(API + "/add_focus", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ session_id: sid, focus_score: score }),
+            }).catch(() => {});
+            pollLatest();
+            count++;
+            if (count === 4) {
+              fetch(API + "/meltdown", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ session_id: sid }),
+              }).then(() => pollLatest()).catch(() => {});
+            }
+            if (count >= max) {
+              clearInterval(iv);
+              fetch(API + "/end_session", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ session_id: sid }),
+              }).then(() => { pollLatest(); loadHistory(); }).catch(() => {});
+              btn.disabled = false;
+              btn.textContent = "Simulate session";
+            }
+          }, 2000);
+        })
+        .catch(() => { btn.disabled = false; btn.textContent = "Simulate session"; });
+    });
   </script>
 </body>
 </html>

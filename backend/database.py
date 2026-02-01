@@ -43,9 +43,16 @@ def init_db():
                 session_id INTEGER NOT NULL,
                 timestamp TEXT NOT NULL,
                 event_type TEXT NOT NULL,
+                notes TEXT,
                 FOREIGN KEY (session_id) REFERENCES sessions(id)
             );
         """)
         conn.commit()
+        # Add notes column if missing (existing DBs)
+        try:
+            conn.execute("ALTER TABLE events ADD COLUMN notes TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
     finally:
         conn.close()
