@@ -1,106 +1,135 @@
 # NeuMe – Parent Monitor
 
-A **Focus Session Logger + Parent Monitor** prototype: receive session, focus, and meltdown data; store it safely (crash-safe SQLite); show parents a live view and progress over time. No headset or game required—simulated inputs are enough for a full end-to-end demo.
+A **parent-facing monitoring dashboard** for focus sessions and comfort breaks. Parents see a calm, summary-first view of how a child’s attention and recovery are trending—without technical charts or raw data. The system stores session, focus, and comfort events in a crash-safe SQLite database and serves them through a REST API; the React frontend polls for live updates and presents two views: **Dashboard** (weekly at a glance) and **Overview** (current session and controls). No headset or game is required—simulated inputs are enough for a full end-to-end demo.
 
-## Tech stack
+---
 
-- **Backend:** Python + Flask  
-- **Database:** SQLite (single `neume.db` file)  
-- **Frontend:** One HTML file with inline CSS and vanilla JavaScript  
+## About the system
 
-## Install dependencies
+### What it does
 
-From the project root (`neume-parent-monitor/`):
+NeuMe Parent Monitor answers a single question first: **“Is my child okay?”** It does not show raw metrics or complex graphs. Instead it surfaces:
 
-```bash
-pip install -r requirements.txt
-```
+- **Session status** — Whether a focus session is running, paused for a comfort break, or ended calmly, with a timestamp when relevant.
+- **Attention energy** — A simple 0–100 “battery” for the latest focus level, interpreted as High (70+), Moderate (40–69), or Low (0–39).
+- **Comfort** — Whether the system has detected stress and triggered a comfort break (“Taking a comfort break”) or that no comfort is needed right now, with reassuring copy.
+- **Weekly summary** — How many sessions happened this week, average engaged time, and how many comfort breaks occurred, with a short narrative (e.g. “Overall, attention has been steady this week with short recovery breaks”).
+- **Attention stability** — A small bar view of the last seven sessions’ attention level (High/Moderate/Low) so parents can see trend at a glance.
+- **Engaged time** — Average time spent in focus during sessions, with context (e.g. “Typical for this child” or “Slightly below weekly average”).
+- **Session rhythm** — A scrollable list of recent sessions with duration and attention level, plus a status dot (green / amber / muted red) for quick scanning.
+- **Session summary** — After a session ends: duration, average attention, comfort break count, and a bold closing line (e.g. “Overall, today’s session felt calm and productive.”).
 
-Or just: `pip install flask`
+The UI is deliberately calm and empathetic: muted colours, rounded cards, and copy that explains what the numbers mean rather than leaving parents to interpret raw values.
 
-Or use a virtual environment:
+### How it works
 
-```bash
-python -m venv venv
-venv\Scripts\activate   # Windows
-# source venv/bin/activate   # macOS/Linux
-pip install flask
-```
+**Data model**
 
-## Run the backend
+- **Sessions** — A session has a start time, an optional end time, and a status: `running`, `interrupted` (e.g. comfort break or ended early), or `ended`. Each session has a unique ID.
+- **Focus logs** — During a session, the client (or a simulator) sends **focus scores** (0–100) at intervals. These are stored with timestamps. The backend does not interpret the score—it only stores and aggregates (e.g. latest score for live display, average for summaries).
+- **Events** — “Meltdown” events represent moments when the system detected stress and triggered a comfort break. A “meltdown_cleared” event records that the parent (or system) acknowledged it. The dashboard uses this to show or hide the “Taking a comfort break” message.
 
-```bash
-cd backend
-python app.py
-```
+**Flow**
 
-The server runs at **http://127.0.0.1:5000**. The SQLite database `neume.db` is created automatically in the `backend/` folder on first run.
+1. **Start session** — Client calls `POST /start_session`. The backend creates a row in `sessions` with `status = 'running'` and returns `session_id`.
+2. **During session** — Client sends `POST /add_focus` with `session_id` and `focus_score` (0–100). Each insert is committed immediately so data is not lost on crash.
+3. **Comfort break** — When the system detects stress (or for demo, when “Trigger Meltdown” is used), client calls `POST /meltdown`. The UI shows the comfort message until `POST /clear_meltdown` is called.
+4. **End session** — Client calls `POST /end_session` with optional `interrupted: true`. The backend sets `end_time` and `status` so duration and summaries can be computed.
+5. **Parent view** — The frontend polls `GET /latest` (about once per second) for current session status, focus score, and meltdown flag; `GET /session_summary` for the latest session’s duration, average focus, and comfort break count; and `GET /history` for session list and weekly aggregates (sessions this week, comfort breaks this week, average duration, and a narrative insight sentence).
 
-## Open the frontend
+**Interpretation**
 
-**Option A – Double-click (easiest)**  
-Open `frontend/index.html` in your browser (double-click the file or **File → Open**).
+- Attention is mapped to **High** (≥70), **Moderate** (40–69), or **Low** (0–39) for display only; the backend does not change stored values.
+- “Engaged time” in the UI is the average session duration (or current session duration so far) derived from start/end times and focus logs.
+- The Dashboard insight line and “Typical for this child” / “Slightly below weekly average” text are derived from comparing current or latest session to weekly averages returned by `/history`.
 
-**Option B – HTTP server**  
-Run the server **from inside** the `neume-parent-monitor` folder (so `/frontend/` exists):
+**Demo mode**
 
-```bash
-cd neume-parent-monitor
-python -m http.server 8000
-```
+The **Overview** tab includes a “Not shown to parents” developer section (with lock icon and “Visible only in demo mode” tooltip). It allows starting/ending sessions, sending focus via a slider, triggering and clearing meltdowns, and running an automated “Simulate session” flow—so the product can be demonstrated without a real headset or game integration.
 
-Then open **http://127.0.0.1:8000/frontend/index.html** in your browser.
+**Tech stack**
 
-If you run `python -m http.server 8000` from a different folder (e.g. `NewMe`), you’ll get 404—the server only serves files under the folder where you started it.
+- **Backend:** Python 3, Flask. Single process; SQLite with immediate commit on every insert (crash-safe).
+- **Database:** SQLite (`neume.db` in `backend/`). Tables: `sessions`, `focus_logs`, `events`. Created automatically on first run.
+- **Frontend:** React 18, Vite. Single-page app with two tabs (Dashboard, Overview); no router. CSS-only styling.
 
-Make sure the backend is running so the dashboard can talk to it.
+---
 
-## End-to-end demo (5 steps)
+## Setup
 
-1. **Start the backend**  
-   In a terminal: `cd backend` then `python app.py`.
+### Prerequisites
 
-2. **Open the dashboard**  
-   Open `frontend/index.html` in your browser, or run `python -m http.server 8000` from `neume-parent-monitor` and go to **http://127.0.0.1:8000/frontend/index.html**.
+- **Python 3.7+** (for the backend)
+- **Node.js 18+** and **npm** (for the frontend)
 
-3. **Start a session**  
-   Click **Start Session**. Status shows “Session Running”. DB row is created.
+### Backend
 
-4. **Simulate focus and events**  
-   - Move the **Focus** slider (0–100); battery bar updates live (green 70+, yellow 40–69, red 0–39).  
-   - Click **Trigger Meltdown** → “Taking a comfort break 💛” appears; click **Clear message** to dismiss.  
-   - Click **End Session** (normal end) or **End session early** (interrupted). Data is preserved.
+1. From the project root, install Python dependencies:
 
-5. **View progress over time**  
-   Scroll to **Progress over time**. See sessions this week, a table of past sessions (start time, duration, avg focus, status), and click **Refresh history** to reload.
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-**Simulate session** runs a short automated demo: starts a session, sends random focus every 2 seconds, triggers one meltdown, then ends—good for judges and demos.
+   Or install Flask only: `pip install flask`
 
-The dashboard polls `/latest` every second; every insert is committed immediately (crash-safe).
+2. (Optional) Use a virtual environment:
 
-## API summary
+   ```bash
+   python -m venv venv
+   venv\Scripts\activate   # Windows
+   # source venv/bin/activate   # macOS / Linux
+   pip install -r requirements.txt
+   ```
 
-| Method | Endpoint       | Purpose |
-|--------|----------------|--------|
-| POST   | `/start_session` | Create session; returns `session_id` |
-| POST   | `/add_focus`     | Send `session_id` + `focus_score` (0–100); optional `timestamp` |
-| POST   | `/meltdown`      | Log meltdown; optional `timestamp`, `notes` |
-| POST   | `/clear_meltdown` | Clear meltdown message for session |
-| POST   | `/end_session`   | Mark ended; send `interrupted: true` for “ended early” |
-| GET    | `/latest`        | Latest session status, focus score, meltdown flag |
-| GET    | `/history`       | List sessions with duration, avg focus; `sessions_this_week` |
+3. Start the server:
 
-## Project structure
+   ```bash
+   cd backend
+   python app.py
+   ```
+
+   The API runs at **http://127.0.0.1:5000**. The file `backend/neume.db` is created automatically on first run.
+
+### Frontend
+
+1. From the project root, install Node dependencies and start the dev server:
+
+   ```bash
+   cd frontend
+   npm install
+   npm run dev
+   ```
+
+   The app is served at **http://localhost:5173**.
+
+2. **Start the backend first.** The Vite dev server proxies requests under `/api` to `http://127.0.0.1:5000`, so the frontend can call the API without CORS issues during development.
+
+3. Open **http://localhost:5173** in a browser. Use the **Overview** tab to start a session, move the Focus slider, trigger/clear meltdown, and end the session; use the **Dashboard** tab to see weekly stats, attention stability, engaged time, and session rhythm.
+
+### Production build (optional)
+
+- Build the frontend: `cd frontend && npm run build`. Output is in `frontend/dist/`.
+- Serve the contents of `frontend/dist/` with any static file server, and ensure the backend is reachable at the URL your frontend uses (e.g. set the API base URL in the app or behind a reverse proxy that forwards `/api` to the Flask server).
+
+### Project structure
 
 ```
 neume-parent-monitor/
 ├── backend/
-│   ├── app.py        # Flask server + endpoints
-│   ├── database.py   # SQLite setup + table creation
-│   └── neume.db      # Created automatically
+│   ├── app.py          # Flask app, routes, and business logic
+│   ├── database.py     # SQLite connection and table creation
+│   └── neume.db        # Created automatically
 ├── frontend/
-│   └── index.html    # Parent dashboard + demo controls
+│   ├── index.html
+│   ├── package.json
+│   ├── vite.config.js  # Dev server and /api proxy
+│   ├── public/
+│   └── src/
+│       ├── main.jsx
+│       ├── App.jsx     # Tabs, Dashboard, Overview, all cards
+│       └── index.css
+├── requirements.txt
 └── README.md
 ```
 
-This is a demo-quality prototype; it can be extended or integrated into a larger system later.
+This is a demo-quality prototype and can be extended or integrated into a larger system (e.g. real headset/game clients, auth, or multi-child support) as needed.

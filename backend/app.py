@@ -159,9 +159,9 @@ def latest():
     """
     conn = database.get_connection()
     try:
-        # Latest session
+        # Latest session (include start_time, end_time for UI timestamp)
         row = conn.execute(
-            "SELECT id, status FROM sessions ORDER BY id DESC LIMIT 1"
+            "SELECT id, status, start_time, end_time FROM sessions ORDER BY id DESC LIMIT 1"
         ).fetchone()
         if not row:
             return jsonify({
@@ -169,9 +169,11 @@ def latest():
                 "status": None,
                 "focus_score": None,
                 "meltdown": False,
+                "start_time": None,
+                "end_time": None,
             })
 
-        session_id, status = row
+        session_id, status, start_time, end_time = row
 
         # Latest focus score for this session
         focus_row = conn.execute(
@@ -196,6 +198,8 @@ def latest():
             "status": status,
             "focus_score": focus_score,
             "meltdown": meltdown,
+            "start_time": start_time,
+            "end_time": end_time,
         })
     finally:
         conn.close()
@@ -211,11 +215,73 @@ def _parse_iso(s):
         return None
 
 
+@app.route("/session_summary", methods=["GET"])
+def session_summary():
+    """
+    Return interpreted summary for the latest session: duration, avg_focus, comfort_breaks_count.
+    For Session Summary card (insight-first).
+    """
+    conn = database.get_connection()
+    try:
+        row = conn.execute(
+            "SELECT id, start_time, end_time, status FROM sessions ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if not row:
+            return jsonify({
+                "session_id": None,
+                "duration_seconds": None,
+                "avg_focus": None,
+                "comfort_breaks_count": 0,
+                "status": None,
+            })
+        sid, start_time, end_time, status = row
+        now = datetime.utcnow()
+        start_dt = _parse_iso(start_time)
+        end_dt = _parse_iso(end_time)
+        duration_seconds = None
+        if start_dt and end_dt:
+            duration_seconds = int((end_dt - start_dt).total_seconds())
+        elif start_dt:
+            duration_seconds = int((now - start_dt).total_seconds())
+
+        avg_row = conn.execute(
+            "SELECT AVG(focus_score) FROM focus_logs WHERE session_id = ?", (sid,)
+        ).fetchone()
+        avg_focus = round(avg_row[0], 1) if avg_row and avg_row[0] is not None else None
+
+        meltdown_row = conn.execute(
+            "SELECT COUNT(*) FROM events WHERE session_id = ? AND event_type = 'meltdown'",
+            (sid,),
+        ).fetchone()
+        comfort_breaks_count = meltdown_row[0] if meltdown_row else 0
+
+        return jsonify({
+            "session_id": sid,
+            "duration_seconds": duration_seconds,
+            "avg_focus": avg_focus,
+            "comfort_breaks_count": comfort_breaks_count,
+            "status": status,
+        })
+    finally:
+        conn.close()
+
+
+def _attention_label(avg_focus):
+    """Map avg_focus to High / Moderate / Low."""
+    if avg_focus is None:
+        return None
+    if avg_focus >= 70:
+        return "High"
+    if avg_focus >= 40:
+        return "Moderate"
+    return "Low"
+
+
 @app.route("/history", methods=["GET"])
 def history():
     """
-    Return session history: list of sessions with duration, avg focus, and sessions this week.
-    For progress-over-time view.
+    Return session history with insight sentence (this week vs last week).
+    Insight-first, data-second.
     """
     conn = database.get_connection()
     try:
@@ -229,9 +295,15 @@ def history():
         ).fetchall()
         sessions_out = []
         now = datetime.utcnow()
-        week_ago = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        week_ago = week_ago - timedelta(days=7)
+        week_ago = now - timedelta(days=7)
+        two_weeks_ago = now - timedelta(days=14)
         sessions_this_week = 0
+        this_week_durations = []
+        this_week_focus = []
+        this_week_meltdowns = 0
+        last_week_durations = []
+        last_week_focus = []
+        last_week_meltdowns = 0
 
         for row in rows:
             sid, start_time, end_time, status = row
@@ -242,8 +314,7 @@ def history():
                 delta = end_dt - start_dt
                 duration_seconds = int(delta.total_seconds())
             elif start_dt:
-                delta = now - start_dt
-                duration_seconds = int(delta.total_seconds())  # in progress
+                duration_seconds = int((now - start_dt).total_seconds())
 
             avg_row = conn.execute(
                 "SELECT AVG(focus_score) FROM focus_logs WHERE session_id = ?",
@@ -251,8 +322,27 @@ def history():
             ).fetchone()
             avg_focus = round(avg_row[0], 1) if avg_row and avg_row[0] is not None else None
 
-            if start_dt and start_dt.replace(tzinfo=None) >= week_ago:
-                sessions_this_week += 1
+            meltdown_row = conn.execute(
+                "SELECT COUNT(*) FROM events WHERE session_id = ? AND event_type = 'meltdown'",
+                (sid,),
+            ).fetchone()
+            meltdown_count = meltdown_row[0] if meltdown_row else 0
+
+            if start_dt:
+                start_naive = start_dt.replace(tzinfo=None) if start_dt.tzinfo else start_dt
+                if start_naive >= week_ago:
+                    sessions_this_week += 1
+                    if duration_seconds is not None:
+                        this_week_durations.append(duration_seconds)
+                    if avg_focus is not None:
+                        this_week_focus.append(avg_focus)
+                    this_week_meltdowns += meltdown_count
+                elif start_naive >= two_weeks_ago:
+                    if duration_seconds is not None:
+                        last_week_durations.append(duration_seconds)
+                    if avg_focus is not None:
+                        last_week_focus.append(avg_focus)
+                    last_week_meltdowns += meltdown_count
 
             sessions_out.append({
                 "session_id": sid,
@@ -263,47 +353,32 @@ def history():
                 "status": status,
             })
 
+        # Generate one insight sentence (priority: lasting longer > attention improving > fewer comfort breaks)
+        insight_sentence = "Keep going — every session helps."
+        if this_week_durations and last_week_durations:
+            this_avg_dur = sum(this_week_durations) / len(this_week_durations)
+            last_avg_dur = sum(last_week_durations) / len(last_week_durations)
+            if this_avg_dur > last_avg_dur * 1.05:
+                insight_sentence = "Sessions are lasting longer this week."
+        if insight_sentence == "Keep going — every session helps." and this_week_focus and last_week_focus:
+            this_avg_f = sum(this_week_focus) / len(this_week_focus)
+            last_avg_f = sum(last_week_focus) / len(last_week_focus)
+            if this_avg_f > last_avg_f + 2:
+                insight_sentence = "Average attention is improving."
+        if insight_sentence == "Keep going — every session helps." and this_week_meltdowns < last_week_meltdowns and last_week_meltdowns > 0:
+            insight_sentence = "Fewer comfort breaks compared to last week."
+
+        avg_duration_this_week = None
+        if this_week_durations:
+            avg_duration_this_week = int(sum(this_week_durations) / len(this_week_durations))
+
         return jsonify({
             "sessions": sessions_out,
             "sessions_this_week": sessions_this_week,
+            "comfort_breaks_this_week": this_week_meltdowns,
+            "avg_duration_seconds_this_week": avg_duration_this_week,
+            "insight_sentence": insight_sentence,
         })
-    finally:
-        conn.close()
-
-
-@app.route("/delete_sessions", methods=["POST"])
-def delete_sessions():
-    """Delete sessions (and their focus_logs and events) in the given ID range. Use to clean up stuck sessions."""
-    data = request.get_json() or {}
-    from_id = data.get("from_id")
-    to_id = data.get("to_id")
-    if from_id is None or to_id is None:
-        return jsonify({"error": "from_id and to_id required"}), 400
-    try:
-        from_id = int(from_id)
-        to_id = int(to_id)
-    except (TypeError, ValueError):
-        return jsonify({"error": "from_id and to_id must be numbers"}), 400
-    if from_id > to_id:
-        from_id, to_id = to_id, from_id
-
-    conn = database.get_connection()
-    try:
-        conn.execute(
-            "DELETE FROM focus_logs WHERE session_id BETWEEN ? AND ?",
-            (from_id, to_id),
-        )
-        conn.execute(
-            "DELETE FROM events WHERE session_id BETWEEN ? AND ?",
-            (from_id, to_id),
-        )
-        cur = conn.execute(
-            "DELETE FROM sessions WHERE id BETWEEN ? AND ?",
-            (from_id, to_id),
-        )
-        conn.commit()
-        deleted = cur.rowcount
-        return jsonify({"ok": True, "deleted": deleted})
     finally:
         conn.close()
 
